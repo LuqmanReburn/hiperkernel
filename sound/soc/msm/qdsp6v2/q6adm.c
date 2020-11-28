@@ -136,7 +136,7 @@ static struct adm_ctl			this_adm;
 
 struct adm_multi_ch_map {
 	bool set_channel_map;
-	char channel_mapping[PCM_FORMAT_MAX_NUM_CHANNEL];
+	char channel_mapping[PCM_FORMAT_MAX_NUM_CHANNEL_V2];
 };
 
 #define ADM_MCH_MAP_IDX_PLAYBACK 0
@@ -1216,7 +1216,7 @@ int adm_set_multi_ch_map(char *channel_map, int path)
 	}
 
 	memcpy(multi_ch_maps[idx].channel_mapping, channel_map,
-		PCM_FORMAT_MAX_NUM_CHANNEL);
+		PCM_FORMAT_MAX_NUM_CHANNEL_V2);
 	multi_ch_maps[idx].set_channel_map = true;
 
 	return 0;
@@ -1237,7 +1237,7 @@ int adm_get_multi_ch_map(char *channel_map, int path)
 
 	if (multi_ch_maps[idx].set_channel_map) {
 		memcpy(channel_map, multi_ch_maps[idx].channel_mapping,
-		       PCM_FORMAT_MAX_NUM_CHANNEL);
+		       PCM_FORMAT_MAX_NUM_CHANNEL_V2);
 	}
 
 	return 0;
@@ -1249,7 +1249,7 @@ static int adm_process_get_param_response(u32 opcode, u32 idx, u32 *payload,
 	struct adm_cmd_rsp_get_pp_params_v5 *v5_rsp = NULL;
 	struct adm_cmd_rsp_get_pp_params_v6 *v6_rsp = NULL;
 	u32 *param_data = NULL;
-	int data_size;
+	int data_size = 0;
 	int struct_size;
 
 	if (payload == NULL) {
@@ -1304,6 +1304,10 @@ static int adm_process_get_param_response(u32 opcode, u32 idx, u32 *payload,
 		pr_debug("%s: GET_PP PARAM: received parameter length: 0x%x\n",
 			 __func__, adm_get_parameters[idx]);
 		/* store params after param_size */
+		if (param_data == NULL) {
+			pr_err("%s: Invalid parameter data got!\n", __func__);
+			return -EINVAL;
+		}
 		memcpy(&adm_get_parameters[idx + 1], param_data, data_size);
 	} else if (payload_size == sizeof(uint32_t)) {
 		adm_get_parameters[idx] = -1;
@@ -2463,7 +2467,7 @@ static int adm_arrange_mch_map_v8(
 			multi_ch_maps[idx].set_channel_map) {
 		memcpy(ep_payload->dev_channel_mapping,
 			multi_ch_maps[idx].channel_mapping,
-			PCM_FORMAT_MAX_NUM_CHANNEL);
+			PCM_FORMAT_MAX_NUM_CHANNEL_V2);
 	} else {
 		if (channel_mode == 1) {
 			ep_payload->dev_channel_mapping[0] = PCM_CHANNEL_FC;

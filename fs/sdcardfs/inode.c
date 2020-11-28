@@ -356,7 +356,8 @@ static int sdcardfs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode
 		touch_err = touch(".nomedia", 0664);
 		if (touch_err) {
 			pr_err("sdcardfs: failed to create .nomedia in %s: %d\n",
-							lower_path.dentry->d_name.name, touch_err);
+						lower_path.dentry->d_name.name,
+						touch_err);
 			goto out;
 		}
 	}
@@ -364,12 +365,12 @@ out:
     task_lock(current);
 	current->fs = saved_fs;
     task_unlock(current);
-
 	free_fs_struct(copied_fs);
 out_unlock:
 	sdcardfs_put_lower_path(dentry, &lower_path);
 out_revert:
     revert_fsids(saved_cred);
+	revert_fsids(saved_cred);
 out_eacces:
 	return err;
 }

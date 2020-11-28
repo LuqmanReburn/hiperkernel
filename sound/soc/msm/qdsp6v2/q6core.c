@@ -57,7 +57,8 @@ struct q6core_str {
 	u32 bus_bw_resp_received;
 	enum cmd_flags {
 		FLAG_NONE,
-		FLAG_CMDRSP_LICENSE_RESULT
+		FLAG_CMDRSP_LICENSE_RESULT,
+		FLAG_AVCS_GET_VERSIONS_RESULT,
 	} cmd_resp_received_flag;
 	u32 avcs_fwk_ver_resp_received;
 	struct mutex cmd_lock;
@@ -71,6 +72,7 @@ struct q6core_str {
 	uint32_t mem_map_cal_handle;
 	int32_t adsp_status;
 	struct q6core_avcs_ver_info q6core_avcs_ver_info;
+	u32 q6_core_avs_version;
 };
 
 static struct q6core_str q6core_lcl;
@@ -577,6 +579,65 @@ cmd_unlock:
 	mutex_unlock(&(q6core_lcl.cmd_lock));
 
 	return rc;
+}
+
+int core_get_adsp_ver(void)
+{
+	struct avcs_cmd_get_version_result get_aver_cmd;
+	int ret = 0;
+
+	mutex_lock(&(q6core_lcl.cmd_lock));
+	ocm_core_open();
+	if (q6core_lcl.core_handle_q == NULL) {
+		pr_err("%s: apr registration for CORE failed\n", __func__);
+		ret  = -ENODEV;
+		goto fail_cmd;
+	}
+
+	get_aver_cmd.hdr.hdr_field = APR_HDR_FIELD(APR_MSG_TYPE_SEQ_CMD,
+				APR_HDR_LEN(APR_HDR_SIZE), APR_PKT_VER);
+	get_aver_cmd.hdr.pkt_size =	sizeof(get_aver_cmd);
+	get_aver_cmd.hdr.src_port = 0;
+	get_aver_cmd.hdr.dest_port = 0;
+	get_aver_cmd.hdr.token = 0;
+	get_aver_cmd.hdr.opcode = AVCS_GET_VERSIONS;
+
+	ret = apr_send_pkt(q6core_lcl.core_handle_q,
+				 (uint32_t *) &get_aver_cmd);
+	if (ret < 0) {
+		pr_err("%s: Core get DSP version  request failed, err %d\n",
+							__func__, ret);
+		ret = -EREMOTE;
+		goto fail_cmd;
+	}
+
+	q6core_lcl.cmd_resp_received_flag &= ~(FLAG_AVCS_GET_VERSIONS_RESULT);
+	mutex_unlock(&(q6core_lcl.cmd_lock));
+	ret = wait_event_timeout(q6core_lcl.cmd_req_wait,
+			(q6core_lcl.cmd_resp_received_flag ==
+				FLAG_AVCS_GET_VERSIONS_RESULT),
+				msecs_to_jiffies(TIMEOUT_MS));
+	mutex_lock(&(q6core_lcl.cmd_lock));
+	if (!ret) {
+		pr_err("%s: wait_event timeout for AVCS_GET_VERSIONS_RESULT\n",
+				__func__);
+		ret = -ETIMEDOUT;
+		goto fail_cmd;
+	}
+	q6core_lcl.cmd_resp_received_flag &= ~(FLAG_AVCS_GET_VERSIONS_RESULT);
+
+fail_cmd:
+	if (ret < 0)
+		q6core_lcl.q6_core_avs_version = Q6_SUBSYS_INVALID;
+	mutex_unlock(&(q6core_lcl.cmd_lock));
+	return ret;
+}
+
+enum q6_subsys_image q6core_get_avs_version(void)
+{
+	if (q6core_lcl.q6_core_avs_version == 0)
+		core_get_adsp_ver();
+	return q6core_lcl.q6_core_avs_version;
 }
 
 int32_t core_get_license_status(uint32_t module_id)

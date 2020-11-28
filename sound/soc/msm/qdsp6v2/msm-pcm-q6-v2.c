@@ -385,6 +385,17 @@ static int msm_pcm_playback_prepare(struct snd_pcm_substream *substream)
 			prtd->audio_client = NULL;
 			return -ENOMEM;
 		}
+	} else if (pdata->avs_ver &&
+			(q6core_get_avs_version() == Q6_SUBSYS_AVS2_7)) {
+		ret = q6asm_open_write_v3(prtd->audio_client,
+				FORMAT_LINEAR_PCM, bits_per_sample);
+		if (ret < 0) {
+			pr_err("%s: q6asm_open_write_v3 failed (%d)\n",
+			__func__, ret);
+			q6asm_audio_client_free(prtd->audio_client);
+			prtd->audio_client = NULL;
+			return -ENOMEM;
+		}
 	} else {
 		ret = q6asm_open_write_with_retry(prtd->audio_client,
 #ifdef CONFIG_MACH_LGE // 24bit ASM patch
@@ -438,6 +449,14 @@ static int msm_pcm_playback_prepare(struct snd_pcm_substream *substream)
 				prtd->channel_map, bits_per_sample,
 				sample_word_size, ASM_LITTLE_ENDIAN,
 				DEFAULT_QF);
+		else if (pdata->avs_ver &&
+				(q6core_get_avs_version() ==
+					Q6_SUBSYS_AVS2_7))
+			ret = q6asm_media_format_block_multi_ch_pcm_v3(
+				prtd->audio_client, runtime->rate,
+				runtime->channels, !prtd->set_channel_map,
+				prtd->channel_map, bits_per_sample,
+				sample_word_size);
 		else
 			ret = q6asm_media_format_block_multi_ch_pcm_v4(
 				prtd->audio_client, runtime->rate,
@@ -502,8 +521,13 @@ static int msm_pcm_capture_prepare(struct snd_pcm_substream *substream)
 		pr_debug("%s Opening %d-ch PCM read stream, perf_mode %d\n",
 				__func__, params_channels(params),
 				prtd->audio_client->perf_mode);
-
-		ret = q6asm_open_read_with_retry(prtd->audio_client,
+		if (pdata->avs_ver &&
+			(q6core_get_avs_version() == Q6_SUBSYS_AVS2_7))
+			ret = q6asm_open_read_v3(prtd->audio_client,
+					FORMAT_LINEAR_PCM,
+					bits_per_sample);
+		else
+			ret = q6asm_open_read_with_retry(prtd->audio_client,
 					FORMAT_LINEAR_PCM,
 					bits_per_sample, false);
 		if (ret < 0) {
@@ -582,6 +606,15 @@ static int msm_pcm_capture_prepare(struct snd_pcm_substream *substream)
 					sample_word_size,
 					ASM_LITTLE_ENDIAN,
 					DEFAULT_QF);
+	else if (pdata->avs_ver &&
+			(q6core_get_avs_version() ==
+				Q6_SUBSYS_AVS2_7))
+		ret = q6asm_enc_cfg_blk_pcm_format_support_v3(
+					prtd->audio_client,
+					prtd->samp_rate,
+					prtd->channel_mode,
+					bits_per_sample,
+					sample_word_size);
 	else
 		ret = q6asm_enc_cfg_blk_pcm_format_support_v4(
 					prtd->audio_client,
@@ -646,8 +679,15 @@ static int msm_pcm_open(struct snd_pcm_substream *substream)
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct snd_soc_pcm_runtime *soc_prtd = substream->private_data;
 	struct msm_audio *prtd;
+	struct msm_plat_data *pdata;
 	int ret = 0;
 
+	pdata = (struct msm_plat_data *)
+		dev_get_drvdata(soc_prtd->platform->dev);
+	if (!pdata) {
+		pr_err("%s: platform data not populated\n", __func__);
+		return -EINVAL;
+	}
 	prtd = kzalloc(sizeof(struct msm_audio), GFP_KERNEL);
 	if (prtd == NULL) {
 		pr_err("Failed to allocate memory for msm_audio\n");
@@ -727,6 +767,10 @@ static int msm_pcm_open(struct snd_pcm_substream *substream)
 	prtd->reset_event = false;
 	runtime->private_data = prtd;
 	msm_adsp_init_mixer_ctl_pp_event_queue(soc_prtd);
+	/* Vote to update the Rx thread priority to RT Thread for playback */
+	if ((substream->stream == SNDRV_PCM_STREAM_PLAYBACK) &&
+	    (pdata->perf_mode == LOW_LATENCY_PCM_MODE))
+		apr_start_rx_rt(prtd->audio_client->apr);
 
 	return 0;
 }
@@ -852,6 +896,16 @@ static int msm_pcm_playback_close(struct snd_pcm_substream *substream)
 	if (prtd->audio_client) {
 		dir = IN;
 
+		/*
+		 * Unvote to downgrade the Rx thread priority from
+		 * RT Thread for Low-Latency use case.
+		 */
+		pdata = (struct msm_plat_data *)
+			dev_get_drvdata(soc_prtd->platform->dev);
+		if (pdata) {
+			if (pdata->perf_mode == LOW_LATENCY_PCM_MODE)
+				apr_end_rx_rt(prtd->audio_client->apr);
+		}
 		/* determine timeout length */
 		if (runtime->frame_bits == 0 || runtime->rate == 0) {
 			timeout = CMD_EOS_MIN_TIMEOUT_LENGTH;
@@ -1168,6 +1222,7 @@ static int msm_pcm_adsp_stream_cmd_put(struct snd_kcontrol *kcontrol,
 		goto done;
 	}
 
+	mutex_lock(&pdata->lock);
 	event_data = (struct msm_adsp_event_data *)ucontrol->value.bytes.data;
 	if ((event_data->event_type < ADSP_STREAM_PP_EVENT) ||
 	    (event_data->event_type >= ADSP_STREAM_EVENT_MAX)) {
@@ -2302,6 +2357,7 @@ static int msm_pcm_channel_mixer_cfg_ctl_put(struct snd_kcontrol *kcontrol,
 	}
 	mutex_unlock(&pdata->lock);
 done:
+	mutex_unlock(&pdata->lock);
 	return ret;
 }
 

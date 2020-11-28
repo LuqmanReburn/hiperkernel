@@ -196,6 +196,8 @@ enum icnss_driver_event_type {
 	ICNSS_DRIVER_EVENT_REGISTER_DRIVER,
 	ICNSS_DRIVER_EVENT_UNREGISTER_DRIVER,
 	ICNSS_DRIVER_EVENT_PD_SERVICE_DOWN,
+	ICNSS_DRIVER_EVENT_IDLE_SHUTDOWN,
+	ICNSS_DRIVER_EVENT_IDLE_RESTART,
 	ICNSS_DRIVER_EVENT_MAX,
 };
 
@@ -636,6 +638,10 @@ static char *icnss_driver_event_to_str(enum icnss_driver_event_type type)
 		return "UNREGISTER_DRIVER";
 	case ICNSS_DRIVER_EVENT_PD_SERVICE_DOWN:
 		return "PD_SERVICE_DOWN";
+	case ICNSS_DRIVER_EVENT_IDLE_SHUTDOWN:
+		return "IDLE_SHUTDOWN";
+	case ICNSS_DRIVER_EVENT_IDLE_RESTART:
+		return "IDLE_RESTART";
 	case ICNSS_DRIVER_EVENT_MAX:
 		return "EVENT_MAX";
 	}
@@ -1205,7 +1211,8 @@ bool icnss_is_fw_down(void)
 		return false;
 
 	return test_bit(ICNSS_FW_DOWN, &penv->state) ||
-		test_bit(ICNSS_PD_RESTART, &penv->state);
+		test_bit(ICNSS_PD_RESTART, &penv->state) ||
+		test_bit(ICNSS_REJUVENATE, &penv->state);
 }
 EXPORT_SYMBOL(icnss_is_fw_down);
 
@@ -2495,6 +2502,52 @@ out:
 	return ret;
 }
 
+static int icnss_driver_event_idle_shutdown(void *data)
+{
+	int ret = 0;
+
+	if (!penv->ops || !penv->ops->idle_shutdown)
+		return 0;
+
+	if (test_bit(ICNSS_MODEM_CRASHED, &penv->state) ||
+			test_bit(ICNSS_PDR, &penv->state) ||
+			test_bit(ICNSS_REJUVENATE, &penv->state)) {
+		icnss_pr_err("SSR/PDR is already in-progress during idle shutdown callback\n");
+		ret = -EBUSY;
+	} else {
+		icnss_pr_dbg("Calling driver idle shutdown, state: 0x%lx\n",
+								penv->state);
+		icnss_block_shutdown(true);
+		ret = penv->ops->idle_shutdown(&penv->pdev->dev);
+		icnss_block_shutdown(false);
+	}
+
+	return ret;
+}
+
+static int icnss_driver_event_idle_restart(void *data)
+{
+	int ret = 0;
+
+	if (!penv->ops || !penv->ops->idle_restart)
+		return 0;
+
+	if (test_bit(ICNSS_MODEM_CRASHED, &penv->state) ||
+			test_bit(ICNSS_PDR, &penv->state) ||
+			test_bit(ICNSS_REJUVENATE, &penv->state)) {
+		icnss_pr_err("SSR/PDR is already in-progress during idle restart callback\n");
+		ret = -EBUSY;
+	} else {
+		icnss_pr_dbg("Calling driver idle restart, state: 0x%lx\n",
+								penv->state);
+		icnss_block_shutdown(true);
+		ret = penv->ops->idle_restart(&penv->pdev->dev);
+		icnss_block_shutdown(false);
+	}
+
+	return ret;
+}
+
 static void icnss_driver_event_work(struct work_struct *work)
 {
 	struct icnss_driver_event *event;
@@ -2535,6 +2588,12 @@ static void icnss_driver_event_work(struct work_struct *work)
 		case ICNSS_DRIVER_EVENT_PD_SERVICE_DOWN:
 			ret = icnss_driver_event_pd_service_down(penv,
 								 event->data);
+			break;
+		case ICNSS_DRIVER_EVENT_IDLE_SHUTDOWN:
+			ret = icnss_driver_event_idle_shutdown(event->data);
+			break;
+		case ICNSS_DRIVER_EVENT_IDLE_RESTART:
+			ret = icnss_driver_event_idle_restart(event->data);
 			break;
 		default:
 			icnss_pr_err("Invalid Event type: %d", event->type);
@@ -3160,6 +3219,8 @@ EXPORT_SYMBOL(icnss_disable_irq);
 
 int icnss_get_soc_info(struct device *dev, struct icnss_soc_info *info)
 {
+	char *fw_build_timestamp = NULL;
+
 	if (!penv || !dev) {
 		icnss_pr_err("Platform driver not initialized\n");
 		return -EINVAL;
@@ -3172,6 +3233,8 @@ int icnss_get_soc_info(struct device *dev, struct icnss_soc_info *info)
 	info->board_id = penv->board_info.board_id;
 	info->soc_id = penv->soc_info.soc_id;
 	info->fw_version = penv->fw_version_info.fw_version;
+	fw_build_timestamp = penv->fw_version_info.fw_build_timestamp;
+	fw_build_timestamp[QMI_WLFW_MAX_TIMESTAMP_LEN_V01] = '\0';
 	strlcpy(info->fw_build_timestamp,
 		penv->fw_version_info.fw_build_timestamp,
 		QMI_WLFW_MAX_TIMESTAMP_LEN_V01 + 1);
@@ -3559,7 +3622,6 @@ int icnss_trigger_recovery(struct device *dev)
 	if (test_bit(ICNSS_PD_RESTART, &priv->state)) {
 		icnss_pr_err("PD recovery already in progress: state: 0x%lx\n",
 			     priv->state);
-		ret = -EPERM;
 		goto out;
 	}
 
@@ -3594,6 +3656,48 @@ out:
 	return ret;
 }
 EXPORT_SYMBOL(icnss_trigger_recovery);
+
+int icnss_idle_shutdown(struct device *dev)
+{
+	struct icnss_priv *priv = dev_get_drvdata(dev);
+
+	if (!priv) {
+		icnss_pr_err("Invalid drvdata: dev %pK", dev);
+		return -EINVAL;
+	}
+
+	if (test_bit(ICNSS_MODEM_CRASHED, &priv->state) ||
+			test_bit(ICNSS_PDR, &priv->state) ||
+			test_bit(ICNSS_REJUVENATE, &penv->state)) {
+		icnss_pr_err("SSR/PDR is already in-progress during idle shutdown\n");
+		return -EBUSY;
+	}
+
+	return icnss_driver_event_post(ICNSS_DRIVER_EVENT_IDLE_SHUTDOWN,
+					ICNSS_EVENT_SYNC_UNINTERRUPTIBLE, NULL);
+}
+EXPORT_SYMBOL(icnss_idle_shutdown);
+
+int icnss_idle_restart(struct device *dev)
+{
+	struct icnss_priv *priv = dev_get_drvdata(dev);
+
+	if (!priv) {
+		icnss_pr_err("Invalid drvdata: dev %pK", dev);
+		return -EINVAL;
+	}
+
+	if (test_bit(ICNSS_MODEM_CRASHED, &priv->state) ||
+			test_bit(ICNSS_PDR, &priv->state) ||
+			test_bit(ICNSS_REJUVENATE, &penv->state)) {
+		icnss_pr_err("SSR/PDR is already in-progress during idle restart\n");
+		return -EBUSY;
+	}
+
+	return icnss_driver_event_post(ICNSS_DRIVER_EVENT_IDLE_RESTART,
+					ICNSS_EVENT_SYNC_UNINTERRUPTIBLE, NULL);
+}
+EXPORT_SYMBOL(icnss_idle_restart);
 
 
 static int icnss_smmu_init(struct icnss_priv *priv)
